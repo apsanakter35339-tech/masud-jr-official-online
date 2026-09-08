@@ -5,6 +5,22 @@ const bcrypt = require('bcryptjs');
 const Database = require('better-sqlite3');
 
 const app = express();
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+
+  if (origin === 'https://masud-jr-official.netlify.app') {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
+
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,x-user-session,x-admin-session');
+
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+
+  next();
+});
 const PORT = process.env.PORT || 3000;
 const siteDir = path.join(__dirname, '..', 'site');
 const adminDir = path.join(__dirname, '..', 'admin');
