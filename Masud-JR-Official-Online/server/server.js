@@ -4,7 +4,6 @@ const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const Database = require('better-sqlite3');
 const cors = require('cors');
-
 const app = express();
 const allowedOrigins = [
   'https://masud-jr-official.netlify.app',
@@ -22,7 +21,6 @@ const PORT = process.env.PORT || 3000;
 const siteDir = path.join(__dirname, '..', 'site');
 const adminDir = path.join(__dirname, '..', 'admin');
 const db = new Database(path.join(__dirname, 'masud-jr.db'));
-
 const TASK_SEED = [
   ['👍 Facebook Like',10,'https://www.facebook.com/share/p/1QHEAz4ufj/'],
   ['▶️ 15 সেকেন্ড Video Watch',50,'https://vt.tiktok.com/ZSqM48aYV/'],
@@ -39,7 +37,6 @@ const TRUCK_SEED = [
   'https://www.tiktok.com/@masud...jr/video/7638558636167400725?is_from_webapp=1&sender_device=pc&web_id=7653554840312972818',
   'https://www.tiktok.com/@masud...jr/photo/7661867906900282644?is_from_webapp=1&sender_device=pc&web_id=7653554840312972818'
 ];
-
 // Database
 // NOTE: this is the first connected version. Existing localStorage-only accounts cannot be migrated automatically.
 db.exec(`
@@ -54,10 +51,10 @@ CREATE TABLE IF NOT EXISTS history(id INTEGER PRIMARY KEY,user_id TEXT,task TEXT
 CREATE TABLE IF NOT EXISTS notices(id INTEGER PRIMARY KEY,title TEXT,body TEXT,active INTEGER DEFAULT 1,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS withdrawals(id INTEGER PRIMARY KEY,user_id TEXT,method TEXT,account TEXT,amount INTEGER,fee INTEGER DEFAULT 70,status TEXT DEFAULT 'pending',created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS fee_payments(id INTEGER PRIMARY KEY,user_id TEXT,amount INTEGER DEFAULT 70,method TEXT,account TEXT,transaction_id TEXT,status TEXT DEFAULT 'pending',created_at TEXT DEFAULT CURRENT_TIMESTAMP,reviewed_at TEXT);
+CREATE TABLE IF NOT EXISTS user_sessions(token TEXT PRIMARY KEY,user_id TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS admin_sessions(token TEXT PRIMARY KEY,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 `);
-
 try { db.exec("ALTER TABLE tasks ADD COLUMN countdown_seconds INTEGER DEFAULT 10"); } catch(e) {}
-
 if (!db.prepare('SELECT id FROM admins WHERE username=?').get('admin')) {
   db.prepare('INSERT INTO admins(username,password_hash) VALUES(?,?)').run('admin', bcrypt.hashSync('change-me-now', 12));
 }
@@ -76,7 +73,6 @@ if (db.prepare('SELECT COUNT(*) n FROM notices').get().n === 0) {
   ins.run('📢 নতুন Task','নতুন Task যোগ করা হলে এখানে দেখা যাবে।');
   ins.run('⚠️ গুরুত্বপূর্ণ ঘোষণা','Task সম্পন্ন করার আগে নিয়ম ভালোভাবে পড়ুন।');
 }
-
 app.use(express.json({limit:'100kb'}));
 app.use(express.urlencoded({extended:false}));
 
@@ -85,13 +81,12 @@ app.use(express.static(siteDir));
 // Admin panel
 app.use('/admin', express.static(adminDir));
 
-const userSessions = new Map();
-const adminSessions = new Set();
+// Persistent sessions: stored in SQLite instead of RAM, so normal server restarts do not log users out.
 const newToken = () => crypto.randomBytes(32).toString('hex');
-
 function requireUser(req,res,next){
   const token = req.headers['x-user-session'];
-  const userId = token && userSessions.get(token);
+  const session = token && db.prepare('SELECT user_id FROM user_sessions WHERE token=?').get(token);
+  const userId = session && session.user_id;
   if (!userId) return res.status(401).json({error:'Login required'});
   const user = db.prepare('SELECT * FROM users WHERE user_id=?').get(userId);
   if (!user || user.status !== 'active') return res.status(403).json({error:'এই Account বর্তমানে বন্ধ আছে।'});
@@ -100,11 +95,10 @@ function requireUser(req,res,next){
 }
 function requireAdmin(req,res,next){
   const token = req.headers['x-admin-session'];
-  if (!token || !adminSessions.has(token)) return res.status(401).json({error:'Unauthorized'});
+  if (!token || !db.prepare('SELECT token FROM admin_sessions WHERE token=?').get(token)) return res.status(401).json({error:'Unauthorized'});
   next();
 }
 function userView(u){return {userId:u.user_id,name:u.name,balance:u.balance,totalIncome:u.total_income,status:u.status};}
-
 // User auth
 app.post('/api/register',(req,res)=>{
   const name = String(req.body.name||'').trim();
@@ -116,29 +110,32 @@ app.post('/api/register',(req,res)=>{
   try {
     db.prepare('INSERT INTO users(user_id,name,password_hash) VALUES(?,?,?)').run(userId,name,hash);
   } catch(e){ return res.status(500).json({error:'Account তৈরি করা যায়নি।'}); }
-  const token = newToken(); userSessions.set(token,userId);
+  const token = newToken();
+  db.prepare('INSERT INTO user_sessions(token,user_id) VALUES(?,?)').run(token,userId);
   const user = db.prepare('SELECT * FROM users WHERE user_id=?').get(userId);
   res.json({ok:true,session:token,user:userView(user)});
 });
-
 app.post('/api/login',(req,res)=>{
   const name = String(req.body.name||'').trim();
   const password = String(req.body.password||'');
   const user = db.prepare('SELECT * FROM users WHERE name=?').get(name);
   if (!user || !bcrypt.compareSync(password,user.password_hash)) return res.status(401).json({error:'নাম অথবা পাসওয়ার্ড ভুল।'});
   if (user.status !== 'active') return res.status(403).json({error:'এই Account বর্তমানে বন্ধ আছে।'});
-  const token = newToken(); userSessions.set(token,user.user_id);
+  const token = newToken();
+  db.prepare('INSERT INTO user_sessions(token,user_id) VALUES(?,?)').run(token,user.user_id);
   res.json({ok:true,session:token,user:userView(user)});
 });
-app.post('/api/logout',requireUser,(req,res)=>{const token=req.headers['x-user-session'];userSessions.delete(token);res.json({ok:true})});
+app.post('/api/logout',requireUser,(req,res)=>{
+  const token=req.headers['x-user-session'];
+  db.prepare('DELETE FROM user_sessions WHERE token=?').run(token);
+  res.json({ok:true});
+});
 app.get('/api/me',requireUser,(req,res)=>res.json({user:userView(req.user)}));
-
 // User content
 app.get('/api/tasks',requireUser,(req,res)=>{
   const rows = db.prepare(`SELECT t.*, EXISTS(SELECT 1 FROM task_completions c WHERE c.user_id=? AND c.task_id=t.id) completed FROM tasks t WHERE t.active=1 ORDER BY t.id`).all(req.user.user_id);
   res.json(rows);
 });
-
 app.post('/api/tasks/:id/start',requireUser,(req,res)=>{
   const task = db.prepare('SELECT * FROM tasks WHERE id=? AND active=1').get(req.params.id);
   if (!task) return res.status(404).json({error:'Task পাওয়া যায়নি।'});
@@ -149,7 +146,6 @@ app.post('/api/tasks/:id/start',requireUser,(req,res)=>{
     ON CONFLICT(user_id,task_id) DO UPDATE SET started_at=excluded.started_at`).run(req.user.user_id,task.id,startedAt);
   res.json({ok:true,startedAt,countdownSeconds:Math.max(1,Number(task.countdown_seconds)||10),url:task.url});
 });
-
 app.post('/api/tasks/:id/complete',requireUser,(req,res)=>{
   const task = db.prepare('SELECT * FROM tasks WHERE id=? AND active=1').get(req.params.id);
   if (!task) return res.status(404).json({error:'Task পাওয়া যায়নি।'});
@@ -169,7 +165,6 @@ app.post('/api/tasks/:id/complete',requireUser,(req,res)=>{
   try { tx(); } catch(e) { return res.status(409).json({error:'এই Task-এর Reward ইতিমধ্যে নেওয়া হয়েছে।'}); }
   res.json({ok:true,reward:task.reward,user:userView(db.prepare('SELECT * FROM users WHERE user_id=?').get(req.user.user_id))});
 });
-
 app.get('/api/trucks',requireUser,(req,res)=>{
   const rows = db.prepare(`SELECT t.*, COALESCE(c.completed_at,0) completed_at FROM trucks t LEFT JOIN truck_completions c ON c.user_id=? AND c.truck_id=t.id WHERE t.active=1 ORDER BY t.id`).all(req.user.user_id);
   res.json(rows);
@@ -188,7 +183,6 @@ app.post('/api/trucks/:id/complete',requireUser,(req,res)=>{
   tx();
   res.json({ok:true,reward:truck.reward,user:userView(db.prepare('SELECT * FROM users WHERE user_id=?').get(req.user.user_id))});
 });
-
 app.get('/api/history',requireUser,(req,res)=>{
   res.json(db.prepare('SELECT task,reward,status,created_at FROM history WHERE user_id=? ORDER BY id DESC').all(req.user.user_id));
 });
@@ -226,12 +220,13 @@ app.post('/api/withdrawals',requireUser,(req,res)=>{
   tx();
   res.json({ok:true,fee,user:userView(db.prepare('SELECT * FROM users WHERE user_id=?').get(req.user.user_id))});
 });
-
 // Admin API
 app.post('/api/admin/login',(req,res)=>{
   const a=db.prepare('SELECT * FROM admins WHERE username=?').get(String(req.body.username||''));
   if(!a || !bcrypt.compareSync(String(req.body.password||''),a.password_hash)) return res.status(401).json({error:'ভুল Admin username অথবা password'});
-  const token=newToken(); adminSessions.add(token); res.json({ok:true,session:token});
+  const token=newToken();
+  db.prepare('INSERT INTO admin_sessions(token) VALUES(?)').run(token);
+  res.json({ok:true,session:token});
 });
 app.get('/api/admin/stats',requireAdmin,(req,res)=>res.json({
   users:db.prepare('SELECT COUNT(*) n FROM users').get().n,
@@ -257,8 +252,7 @@ app.patch('/api/admin/fee-payments/:id',requireAdmin,(req,res)=>{
 });
 app.get('/api/admin/withdrawals',requireAdmin,(req,res)=>res.json(db.prepare('SELECT * FROM withdrawals ORDER BY id DESC').all()));
 app.patch('/api/admin/withdrawals/:id',requireAdmin,(req,res)=>{const ok=['pending','approved','paid','rejected'];const s=ok.includes(req.body.status)?req.body.status:'pending';db.prepare('UPDATE withdrawals SET status=? WHERE id=?').run(s,req.params.id);res.json({ok:true})});
-app.post('/api/admin/logout',requireAdmin,(req,res)=>{adminSessions.delete(req.headers['x-admin-session']);res.json({ok:true})});
-
+app.post('/api/admin/logout',requireAdmin,(req,res)=>{db.prepare('DELETE FROM admin_sessions WHERE token=?').run(req.headers['x-admin-session']);res.json({ok:true})});
 app.get('/admin',(req,res)=>res.redirect('/admin/'));
 app.get('/',(req,res)=>res.sendFile(path.join(siteDir,'index.html')));
 
