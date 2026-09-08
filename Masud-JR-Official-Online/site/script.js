@@ -1,4 +1,4 @@
-const API_BASE=window.MJR_API_BASE||'https://YOUR-RENDER-SERVICE.onrender.com';
+const API_BASE='https://masud-jr-official-online.onrender.com';
 const LOCK=86400000;
 let S=localStorage.getItem('mjrUserSession')||'';
 let ME=null;
